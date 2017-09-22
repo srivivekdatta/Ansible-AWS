@@ -1,0 +1,103 @@
+# Launch instances, runs some tasks and then stop them
+
+- name: Provisioning EC2 Ubuntu Server
+  hosts: localhost
+  connection: local
+  gather_facts: False
+
+# Configuration variables to launch
+  vars:
+    ami: ami-785db401
+    instance_type: t2.micro
+    instance_count: 1
+    subnet_id: subnet-f66ce191
+    region: eu-west-1
+    tag_name: Ansible-Ubuntu
+    security_group_id: sg-edf56f95
+    keyname: "Keypair"   # User keypair
+
+  tasks:
+  - name: Creating instance
+    ec2:
+      image: "{{ ami }}"
+      instance_type: "{{ instance_type }}"
+      count: "{{ instance_count }}"
+      vpc_subnet_id: "{{ subnet_id }}"
+      region: "{{ region }}"
+      instance_tags:
+          Name: "{{ tag_name }}"
+      group_id: "{{ security_group_id }}"
+      assign_public_ip: yes
+      key_name: "{{ keyname }}"
+      wait: yes
+      user_data: "{{lookup('file', 'user_data.sh')}}"
+    register: ec2
+
+  - name: Add instance public IP to host group
+    add_host:
+      hostname={{ item.public_ip }}
+      groups=ec2hosts
+    with_items: "{{ ec2.instances }}"
+
+  - name: Wait for SSH to come up
+    wait_for:
+      host: "{{ item.public_dns_name }}"
+      port: 22
+      delay: 30
+      timeout: 320
+      state: started
+    with_items: "{{ ec2.instances }}"
+
+- name: Build images and launch containers
+  hosts: ec2hosts
+  user: ubuntu
+  gather_facts: true
+
+  tasks:
+    - name: Setup alternate SSH port
+      lineinfile:
+        dest: "/etc/ssh/sshd_config"
+        regexp: "^Port"
+        line: "Port 2222"
+      become: yes
+      become_user: root
+      notify: "Restart sshd"
+
+  handlers:
+    - name: Restart sshd
+      become: yes
+      become_user: root
+      service: name=sshd state=restarted
+
+- name: Build images and launch containers
+  hosts: ec2hosts
+  user: ubuntu
+  gather_facts: true
+
+  tasks:
+    - name: Change ssh port to 2222
+      set_fact:
+        ansible_port=2222
+
+    - name: Create app directory
+      file:
+        path: /home/ubuntu/app
+        state: directory
+        mode: 0755
+
+    - name: Create index.php file
+      file:
+        path: /home/ubuntu/app/index.php
+        state: touch
+        mode: "u=rwx,g=rwx,o=r"
+
+    - name: Copy files and folders
+      copy:
+        src={{ item.src }}
+        dest={{ item.dest }}
+      with_items:
+        - { src: '/home/vvek/Downloads/ansible-test/app/index.php', dest: '~/app/index.php' }
+        - { src: '/home/vvek/Downloads/ansible-test/docker-compose.yml', dest: '~' }
+
+    - name: Execute docker-compose.yml
+      command: chdir=/home/ubuntu docker-compose up -d
